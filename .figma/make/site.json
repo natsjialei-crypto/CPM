@@ -1,0 +1,10 @@
+{
+  "description": "Streamlines Emerson CPM product design by integrating standard design specs and functional requirements to ensure precise and efficient development.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

@@ -1,0 +1,94 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --color-brand: #004B8D;
+  --color-brand-hover: #005A9B;
+  --color-brand-active: #003C71;
+  --color-brand-subtle: #EEF5FB;
+
+  --color-canvas: #E9EDF2;
+  --color-card-surface: #FFFFFF;
+  --color-section-bg: #F1F3F6;
+
+  --color-s-normal: #39C523;
+  --color-s-attention: #F2B544;
+  --color-s-warning: #F28C28;
+  --color-s-critical: #D93838;
+  --color-s-info: #0069A8;
+  --color-s-offline: #626972;
+
+  --color-text-p: #171A1E;
+  --color-text-s: #515760;
+  --color-text-t: #747A82;
+  --color-text-m: #9FA6AF;
+
+  --color-border-d: #CDD2D9;
+  --color-border-s: #E0E4E9;
+
+  --color-blue-50: #EEF5FB;
+  --color-blue-100: #D9EAF7;
+  --color-blue-300: #82B9DD;
+  --color-blue-400: #3E8FC3;
+  --color-blue-500: #0069A8;
+  --color-blue-700: #004B8D;
+  --color-blue-800: #003C71;
+  --color-blue-900: #002C55;
+
+  --color-sl-50: #F7F8FA;
+  --color-sl-100: #EEF1F4;
+  --color-sl-200: #E0E4E9;
+  --color-sl-300: #CDD2D9;
+  --color-sl-500: #9FA1A4;
+  --color-sl-600: #747A82;
+  --color-sl-700: #515760;
+  --color-sl-800: #30353B;
+  --color-sl-900: #171A1E;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: #E9EDF2;
+  color: #171A1E;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.font-data {
+  font-family: "Inter Tight", "Arial Narrow", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono-code {
+  font-family: "JetBrains Mono", "Roboto Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
