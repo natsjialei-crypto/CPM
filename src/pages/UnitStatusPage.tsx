@@ -1,116 +1,212 @@
-import { useState } from "react"
-import { plant, getAllLoopsFromUnit, computeUnitStats } from "../data/mockData"
-import type { AppState, Unit, UnitStatus } from "../types"
+import { useMemo, useState } from "react"
+import { allLoops } from "../data/mockData"
+import type { AppState, Loop, Unit } from "../types"
+import { useOperationalState } from "../state/OperationalState"
 
-function ConfirmModal({ unit, targetStatus, onConfirm, onCancel }: {
-  unit: Unit
-  targetStatus: UnitStatus
-  onConfirm: (reason: string, operator: string) => void
-  onCancel: () => void
+type ViewMode = "card" | "list"
+type LoopGroup = "total" | "auto" | "manual" | "unused"
+
+interface LoopDialogState {
+  unitId: string
+  group: LoopGroup
+  label: string
+}
+
+function modeLabel(mode: Loop["mode"]) {
+  return mode === "auto" ? "自动" : mode === "manual" ? "手动" : "未投用"
+}
+
+function getGroupLoops(loops: Loop[], group: LoopGroup, isRunning: boolean) {
+  if (group === "total") return loops
+  if (group === "unused" && !isRunning) return loops
+  return loops.filter((loop) => loop.mode === group)
+}
+
+function StatusBadge({ running }: { running: boolean }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "4px 10px",
+        borderRadius: 20,
+        background: running ? "#EFF9EC" : "#F1F3F6",
+        border: `1px solid ${running ? "rgba(57,197,35,0.3)" : "#E0E4E9"}`,
+        color: running ? "#237D17" : "#626972",
+        fontSize: 12,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: running ? "#39C523" : "#9FA1A4" }} />
+      {running ? "运行中" : "停车中"}
+    </span>
+  )
+}
+
+function StatButton({
+  label,
+  value,
+  onClick,
+  compact = false,
+}: {
+  label: string
+  value: number
+  onClick: () => void
+  compact?: boolean
 }) {
-  const [reason, setReason] = useState("")
-  const [operator, setOperator] = useState("")
-  const isStartup = targetStatus === "running"
+  if (compact) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        title={`查看${label}回路`}
+        style={{
+          padding: "3px 8px",
+          border: "1px solid #D9EAF7",
+          borderRadius: 6,
+          background: "#EEF5FB",
+          color: "#004B8D",
+          fontSize: 13,
+          fontWeight: 700,
+          cursor: "pointer",
+          minWidth: 34,
+        }}
+      >
+        {value}
+      </button>
+    )
+  }
 
   return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        width: "100%",
+        padding: "8px 10px",
+        textAlign: "left",
+        background: "#F9FAFB",
+        border: "1px solid transparent",
+        borderRadius: 7,
+        cursor: "pointer",
+      }}
+      onMouseEnter={(event) => {
+        event.currentTarget.style.background = "#EEF5FB"
+        event.currentTarget.style.borderColor = "#D9EAF7"
+      }}
+      onMouseLeave={(event) => {
+        event.currentTarget.style.background = "#F9FAFB"
+        event.currentTarget.style.borderColor = "transparent"
+      }}
+    >
+      <span style={{ display: "block", fontSize: 10, color: "#9FA6AF", marginBottom: 3 }}>{label}</span>
+      <span className="font-data" style={{ fontSize: 16, fontWeight: 700, color: "#004B8D", textDecoration: "underline", textDecorationColor: "#B8D8EE", textUnderlineOffset: 3 }}>
+        {value}
+      </span>
+    </button>
+  )
+}
+
+function LoopDialog({
+  unit,
+  label,
+  loops,
+  onClose,
+  onOpenLoop,
+}: {
+  unit: Unit
+  label: string
+  loops: Loop[]
+  onClose: () => void
+  onOpenLoop: (loopId: string) => void
+}) {
+  return (
     <div
+      role="presentation"
+      onClick={onClose}
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.4)",
+        zIndex: 100,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 1000,
+        padding: 24,
+        background: "rgba(27,39,52,0.32)",
+        backdropFilter: "blur(2px)",
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${unit.deviceCode} ${label}回路`}
+        onClick={(event) => event.stopPropagation()}
         style={{
-          background: "white",
+          width: "min(820px, 92vw)",
+          maxHeight: "78vh",
+          display: "flex",
+          flexDirection: "column",
+          background: "#FFFFFF",
           borderRadius: 14,
+          border: "1px solid rgba(69,83,99,0.12)",
           boxShadow: "0 16px 40px rgba(20,34,48,0.18)",
-          padding: "28px 32px",
-          width: 480,
+          overflow: "hidden",
         }}
       >
-        <h3 style={{ fontSize: 16, fontWeight: 700, color: "#171A1E", margin: "0 0 6px" }}>
-          {isStartup ? "确认开车" : "确认停车"}
-        </h3>
-        <p style={{ fontSize: 13, color: "#747A82", margin: "0 0 20px" }}>
-          单元：<strong style={{ color: "#30353B" }}>{unit.name}</strong>
-          {isStartup ? "，将恢复该单元下所有回路的性能评价计算。" : "，将暂停该单元下所有回路的性能评价计算，并将所有回路置为【未投用-未开工】状态。"}
-        </p>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 12, color: "#515760", display: "block", marginBottom: 5, fontWeight: 500 }}>
-            操作人 *
-          </label>
-          <input
-            value={operator}
-            onChange={(e) => setOperator(e.target.value)}
-            placeholder="请输入操作人姓名"
-            style={{
-              width: "100%",
-              height: 38,
-              padding: "0 12px",
-              border: "1px solid #CDD2D9",
-              borderRadius: 8,
-              fontSize: 13,
-              outline: "none",
-            }}
-            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "#004B8D" }}
-            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "#CDD2D9" }}
-          />
-        </div>
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 12, color: "#515760", display: "block", marginBottom: 5, fontWeight: 500 }}>
-            {isStartup ? "开车原因/备注" : "停车原因 *"}
-          </label>
-          <textarea
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder={isStartup ? "计划开车，请说明..." : "停车原因，如：计划停车检修..."}
-            rows={3}
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: "1px solid #CDD2D9",
-              borderRadius: 8,
-              fontSize: 13,
-              resize: "none",
-              outline: "none",
-              fontFamily: "inherit",
-            }}
-            onFocus={(e) => { (e.target as HTMLTextAreaElement).style.borderColor = "#004B8D" }}
-            onBlur={(e) => { (e.target as HTMLTextAreaElement).style.borderColor = "#CDD2D9" }}
-          />
-        </div>
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            onClick={onCancel}
-            style={{ height: 38, padding: "0 18px", background: "white", color: "#515760", border: "1px solid #CDD2D9", borderRadius: 8, fontSize: 13, cursor: "pointer" }}
-          >
-            取消
+        <div style={{ padding: "18px 20px", display: "flex", alignItems: "center", borderBottom: "1px solid #E0E4E9" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+              <span className="font-mono-code" style={{ fontSize: 15, fontWeight: 700, color: "#004B8D" }}>{unit.deviceCode}</span>
+              <span style={{ fontSize: 15, fontWeight: 600, color: "#30353B" }}>{label}回路</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#9FA6AF" }}>{unit.deviceName} · 共 {loops.length} 个回路</div>
+          </div>
+          <button type="button" aria-label="关闭" onClick={onClose} style={{ width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 7, background: "#F7F8FA", color: "#747A82", cursor: "pointer" }}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M3.5 3.5l9 9m0-9l-9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
           </button>
-          <button
-            onClick={() => {
-              if (!operator.trim()) { alert("请填写操作人"); return }
-              if (!isStartup && !reason.trim()) { alert("请填写停车原因"); return }
-              onConfirm(reason, operator)
-            }}
-            style={{
-              height: 38,
-              padding: "0 18px",
-              background: isStartup ? "#004B8D" : "#D93838",
-              color: "white",
-              border: "none",
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            确认{isStartup ? "开车" : "停车"}
-          </button>
+        </div>
+
+        <div style={{ overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+              <tr style={{ background: "#F7F8FA" }}>
+                {["位号", "回路名称", "运行模式", "性能得分", "操作"].map((heading) => (
+                  <th key={heading} style={{ padding: "10px 16px", borderBottom: "1px solid #E0E4E9", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#747A82" }}>
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loops.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ padding: 48, textAlign: "center", color: "#9FA6AF", fontSize: 13 }}>当前分类下暂无回路</td>
+                </tr>
+              ) : loops.map((loop, index) => (
+                <tr key={loop.id} style={{ borderBottom: index < loops.length - 1 ? "1px solid #F1F3F6" : "none" }}>
+                  <td style={{ padding: "12px 16px" }}>
+                    <span className="font-mono-code" style={{ fontSize: 12, fontWeight: 600, color: "#004B8D" }}>{loop.tag}</span>
+                  </td>
+                  <td style={{ padding: "12px 16px", fontSize: 12, color: "#30353B" }}>{loop.name}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 12, color: "#515760" }}>{modeLabel(loop.mode)}</td>
+                  <td style={{ padding: "12px 16px" }}>
+                    <span className="font-data" style={{ fontSize: 13, fontWeight: 700, color: loop.performanceScore >= 80 ? "#1A7A0A" : loop.performanceScore >= 60 ? "#92600A" : "#D93838" }}>
+                      {loop.performanceScore}
+                    </span>
+                  </td>
+                  <td style={{ padding: "12px 16px" }}>
+                    <button type="button" onClick={() => onOpenLoop(loop.id)} style={{ padding: "5px 10px", border: "1px solid #D9EAF7", borderRadius: 6, background: "#EEF5FB", color: "#004B8D", fontSize: 11, fontWeight: 500, cursor: "pointer" }}>
+                      查看详情
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -122,230 +218,186 @@ export default function UnitStatusPage({
 }: {
   navigate: (page: AppState["page"], extra?: Partial<AppState>) => void
 }) {
-  const [units, setUnits] = useState(() => plant.units.map((u) => ({ ...u })))
-  const [confirmTarget, setConfirmTarget] = useState<{ unit: Unit; targetStatus: UnitStatus } | null>(null)
-  const [history, setHistory] = useState<Array<{ unitName: string; action: string; operator: string; time: string; reason: string }>>([
+  const { units, assetLoops } = useOperationalState()
+  const [viewMode, setViewMode] = useState<ViewMode>("card")
+  const [dialog, setDialog] = useState<LoopDialogState | null>(null)
+  const history = [
     { unitName: "T301 精馏塔", action: "停车", operator: "操作班B", time: "2024-03-01 06:30", reason: "计划停车检修，预计3天" },
-  ])
+  ]
 
-  const handleStatusChange = (unit: Unit, target: UnitStatus) => {
-    setConfirmTarget({ unit, targetStatus: target })
-  }
-
-  const handleConfirm = (reason: string, operator: string) => {
-    if (!confirmTarget) return
-    const now = new Date().toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
-    setUnits((prev) =>
-      prev.map((u) =>
-        u.id === confirmTarget.unit.id
-          ? { ...u, status: confirmTarget.targetStatus, statusChangedAt: now, operatedBy: operator }
-          : u,
-      ),
-    )
-    setHistory((prev) => [
-      {
-        unitName: confirmTarget.unit.name,
-        action: confirmTarget.targetStatus === "running" ? "开车" : "停车",
-        operator,
-        time: now,
-        reason: reason || "—",
-      },
-      ...prev,
+  const unitLoops = useMemo(() => Object.fromEntries(units.map((unit) => {
+    const mountedLoopIds = new Set([
+      ...(assetLoops[unit.id] || []),
+      ...unit.sections.flatMap((section) => assetLoops[section.id] || []),
     ])
-    setConfirmTarget(null)
+    return [unit.id, allLoops.filter((loop) => mountedLoopIds.has(loop.id))]
+  })), [assetLoops, units])
+
+  const openGroup = (unit: Unit, group: LoopGroup, label: string) => {
+    setDialog({ unitId: unit.id, group, label })
   }
+
+  const getStats = (unit: Unit) => {
+    const loops = unitLoops[unit.id] || []
+    const running = unit.status === "running"
+    return [
+      { key: "total" as const, label: "回路总数", value: loops.length },
+      { key: "auto" as const, label: "自动模式", value: loops.filter((loop) => loop.mode === "auto").length },
+      { key: "manual" as const, label: "手动模式", value: loops.filter((loop) => loop.mode === "manual").length },
+      { key: "unused" as const, label: "未投用", value: running ? loops.filter((loop) => loop.mode === "unused").length : loops.length },
+    ]
+  }
+
+  const dialogUnit = dialog ? units.find((unit) => unit.id === dialog.unitId) : null
+  const dialogLoops = dialog && dialogUnit
+    ? getGroupLoops(unitLoops[dialogUnit.id] || [], dialog.group, dialogUnit.status === "running")
+    : []
 
   return (
-    <div style={{ padding: "24px" }}>
+    <div style={{ padding: 24 }}>
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#171A1E", margin: 0 }}>单元状态管理</h1>
-          <p style={{ fontSize: 13, color: "#747A82", margin: "4px 0 0" }}>
-            管理各工艺单元的开停车状态，停车期间自动暂停性能评价计算
-          </p>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#171A1E" }}>单元状态管理</div>
+          <div style={{ fontSize: 13, color: "#747A82", marginTop: 4 }}>只读展示程序自动识别的当前状态，点击回路数字可查看明细</div>
         </div>
-        <div style={{ fontSize: 12, color: "#9FA6AF", background: "white", padding: "6px 12px", borderRadius: 8, border: "1px solid #E0E4E9" }}>
-          依据 GB/T 44693.2 §6.1.4
-        </div>
-      </div>
-
-      {/* Unit cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 28 }}>
-        {units.map((unit) => {
-          const loops = getAllLoopsFromUnit(unit)
-          const stats = computeUnitStats(unit)
-          const isRunning = unit.status === "running"
-
-          return (
-            <div
-              key={unit.id}
-              style={{
-                background: "white",
-                borderRadius: 12,
-                border: isRunning ? "1px solid rgba(57, 197, 35, 0.25)" : "1px solid rgba(96,108,122,0.12)",
-                boxShadow: "0 8px 24px rgba(27,39,52,0.07), inset 0 1px 0 rgba(255,255,255,0.8)",
-                padding: "20px",
-                position: "relative",
-                overflow: "hidden",
-              }}
-            >
-              {/* Status bar */}
-              <div
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  height: 4,
-                  background: isRunning ? "#39C523" : "#9FA1A4",
-                }}
-              />
-
-              <div className="flex items-start justify-between mb-4 mt-2">
-                <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
-                    <span className="font-mono-code" style={{ fontSize: 15, fontWeight: 700, color: "#004B8D" }}>
-                      {unit.deviceCode}
-                    </span>
-                    <span style={{ fontSize: 15, fontWeight: 500, color: "#30353B" }}>{unit.deviceName}</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: "#747A82" }}>{unit.name}</div>
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "4px 10px",
-                    borderRadius: 20,
-                    background: isRunning ? "#EFF9EC" : "#F1F3F6",
-                    border: `1px solid ${isRunning ? "rgba(57,197,35,0.3)" : "#E0E4E9"}`,
-                  }}
-                >
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: isRunning ? "#39C523" : "#9FA1A4" }} />
-                  <span style={{ fontSize: 12, fontWeight: 600, color: isRunning ? "#237D17" : "#626972" }}>
-                    {isRunning ? "运行中" : "停车中"}
-                  </span>
-                </div>
-              </div>
-
-              {/* Info grid */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
-                {[
-                  { label: "回路总数", value: stats.total },
-                  { label: "自动模式", value: isRunning ? stats.auto : "—" },
-                  { label: "手动模式", value: isRunning ? stats.manual : "—" },
-                  { label: "未投用", value: isRunning ? stats.unused : stats.total },
-                ].map((item) => (
-                  <div key={item.label} style={{ background: "#F9FAFB", borderRadius: 7, padding: "8px 10px" }}>
-                    <div style={{ fontSize: 10, color: "#9FA6AF", marginBottom: 3 }}>{item.label}</div>
-                    <div className="font-data" style={{ fontSize: 16, fontWeight: 700, color: "#30353B" }}>{item.value}</div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Last change info */}
-              <div style={{ fontSize: 11, color: "#9FA6AF", marginBottom: 16, display: "flex", gap: 12 }}>
-                <span>状态变更：{unit.statusChangedAt}</span>
-                <span>操作人：{unit.operatedBy}</span>
-              </div>
-
-              {/* Action button */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", padding: 3, borderRadius: 8, background: "#E0E4E9" }}>
+            {([
+              { value: "card" as const, label: "卡片" },
+              { value: "list" as const, label: "列表" },
+            ]).map((option) => (
               <button
-                onClick={() => handleStatusChange(unit, isRunning ? "shutdown" : "running")}
+                type="button"
+                key={option.value}
+                onClick={() => setViewMode(option.value)}
                 style={{
-                  width: "100%",
-                  height: 38,
-                  borderRadius: 8,
-                  border: isRunning ? "1px solid #FCA5A5" : "1px solid #D9EAF7",
-                  background: isRunning ? "#FEF2F2" : "#EEF5FB",
-                  color: isRunning ? "#991B1B" : "#004B8D",
-                  fontSize: 13,
-                  fontWeight: 600,
+                  height: 30,
+                  padding: "0 12px",
+                  border: "none",
+                  borderRadius: 6,
+                  background: viewMode === option.value ? "#FFFFFF" : "transparent",
+                  color: viewMode === option.value ? "#004B8D" : "#747A82",
+                  boxShadow: viewMode === option.value ? "0 1px 3px rgba(27,39,52,0.12)" : "none",
+                  fontSize: 12,
+                  fontWeight: viewMode === option.value ? 600 : 400,
                   cursor: "pointer",
-                  transition: "all 160ms",
-                }}
-                onMouseEnter={(e) => {
-                  const el = e.currentTarget as HTMLElement
-                  el.style.background = isRunning ? "#FECACA" : "#D9EAF7"
-                }}
-                onMouseLeave={(e) => {
-                  const el = e.currentTarget as HTMLElement
-                  el.style.background = isRunning ? "#FEF2F2" : "#EEF5FB"
                 }}
               >
-                {isRunning ? "⏸ 执行停车" : "▶ 执行开车"}
+                {option.label}
               </button>
-            </div>
-          )
-        })}
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: "#9FA6AF", background: "#FFFFFF", padding: "6px 12px", borderRadius: 8, border: "1px solid #E0E4E9" }}>依据 GB/T 44693.2 §6.1.4</div>
+        </div>
       </div>
 
-      {/* History */}
-      <div
-        style={{
-          background: "white",
-          borderRadius: 12,
-          border: "1px solid rgba(96,108,122,0.12)",
-          boxShadow: "0 8px 24px rgba(27,39,52,0.07)",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ padding: "16px 20px", borderBottom: "1px solid #E0E4E9" }}>
-          <h2 style={{ fontSize: 14, fontWeight: 600, color: "#30353B", margin: 0 }}>状态变更历史</h2>
+      {viewMode === "card" ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 16, marginBottom: 28 }}>
+          {units.map((unit) => {
+            const running = unit.status === "running"
+            return (
+              <div key={unit.id} style={{ background: "#FFFFFF", borderRadius: 12, border: running ? "1px solid rgba(57,197,35,0.25)" : "1px solid rgba(96,108,122,0.12)", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", padding: 20, position: "relative", overflow: "hidden" }}>
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 4, background: running ? "#39C523" : "#9FA1A4" }} />
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginTop: 8, marginBottom: 16 }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                      <span className="font-mono-code" style={{ fontSize: 15, fontWeight: 700, color: "#004B8D" }}>{unit.deviceCode}</span>
+                      <span style={{ fontSize: 15, fontWeight: 500, color: "#30353B" }}>{unit.deviceName}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#747A82" }}>{unit.name}</div>
+                  </div>
+                  <StatusBadge running={running} />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+                  {getStats(unit).map((stat) => (
+                    <StatButton key={stat.key} label={stat.label} value={stat.value} onClick={() => openGroup(unit, stat.key, stat.label)} />
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: "#9FA6AF", marginBottom: 16, display: "flex", gap: 12 }}>
+                  <span>状态变更：{unit.statusChangedAt}</span>
+                  <span>操作人：{unit.operatedBy}</span>
+                </div>
+                <div style={{ width: "100%", height: 38, borderRadius: 8, border: "1px solid #E0E4E9", background: "#F7F8FA", color: "#747A82", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                    <path d="M3 6.5a3.5 3.5 0 016.1-2.35M10 2.5v2.3H7.7M10 6.5a3.5 3.5 0 01-6.1 2.35M3 10.5V8.2h2.3" stroke="#747A82" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  当前状态由接口自动更新
+                </div>
+              </div>
+            )
+          })}
         </div>
+      ) : (
+        <div style={{ background: "#FFFFFF", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", overflow: "hidden", marginBottom: 28 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#F7F8FA" }}>
+                {["单元", "当前状态", "回路总数", "自动模式", "手动模式", "未投用", "最近更新时间"].map((heading) => (
+                  <th key={heading} style={{ padding: "11px 16px", borderBottom: "1px solid #E0E4E9", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#747A82" }}>{heading}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {units.map((unit, index) => {
+                const stats = getStats(unit)
+                return (
+                  <tr key={unit.id} style={{ borderBottom: index < units.length - 1 ? "1px solid #F1F3F6" : "none" }}>
+                    <td style={{ padding: "13px 16px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <span className="font-mono-code" style={{ fontSize: 13, fontWeight: 700, color: "#004B8D" }}>{unit.deviceCode}</span>
+                        <span style={{ fontSize: 12, color: "#515760" }}>{unit.deviceName}</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: "#9FA6AF", marginTop: 2 }}>{unit.name}</div>
+                    </td>
+                    <td style={{ padding: "13px 16px" }}><StatusBadge running={unit.status === "running"} /></td>
+                    {stats.map((stat) => (
+                      <td key={stat.key} style={{ padding: "13px 16px" }}>
+                        <StatButton compact label={stat.label} value={stat.value} onClick={() => openGroup(unit, stat.key, stat.label)} />
+                      </td>
+                    ))}
+                    <td style={{ padding: "13px 16px" }}>
+                      <div className="font-data" style={{ fontSize: 11, color: "#515760" }}>{unit.statusChangedAt}</div>
+                      <div style={{ fontSize: 10, color: "#9FA6AF", marginTop: 2 }}>{unit.operatedBy}</div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ background: "#FFFFFF", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #E0E4E9", fontSize: 14, fontWeight: 600, color: "#30353B" }}>状态变更历史</div>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#F7F8FA" }}>
-              {["单元", "操作", "操作人", "时间", "原因/备注"].map((h) => (
-                <th
-                  key={h}
-                  style={{ padding: "10px 16px", fontSize: 11, fontWeight: 600, color: "#747A82", textAlign: "left", borderBottom: "1px solid #E0E4E9", letterSpacing: "0.04em" }}
-                >
-                  {h}
-                </th>
+              {["单元", "状态", "数据来源", "时间", "说明"].map((heading) => (
+                <th key={heading} style={{ padding: "10px 16px", fontSize: 11, fontWeight: 600, color: "#747A82", textAlign: "left", borderBottom: "1px solid #E0E4E9" }}>{heading}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {history.map((rec, idx) => (
-              <tr
-                key={idx}
-                style={{ borderBottom: idx < history.length - 1 ? "1px solid #F1F3F6" : "none" }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "#F9FAFB" }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "white" }}
-              >
-                <td style={{ padding: "11px 16px", fontSize: 13, color: "#30353B" }}>{rec.unitName}</td>
-                <td style={{ padding: "11px 16px" }}>
-                  <span style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    padding: "2px 8px",
-                    borderRadius: 4,
-                    background: rec.action === "开车" ? "#EFF9EC" : "#F1F3F6",
-                    color: rec.action === "开车" ? "#237D17" : "#626972",
-                  }}>
-                    {rec.action}
-                  </span>
-                </td>
-                <td style={{ padding: "11px 16px", fontSize: 13, color: "#515760" }}>{rec.operator}</td>
-                <td style={{ padding: "11px 16px", fontSize: 13, color: "#515760" }}>
-                  <span className="font-data">{rec.time}</span>
-                </td>
-                <td style={{ padding: "11px 16px", fontSize: 12, color: "#747A82" }}>{rec.reason}</td>
+            {history.map((record) => (
+              <tr key={`${record.unitName}-${record.time}`}>
+                <td style={{ padding: "11px 16px", fontSize: 13, color: "#30353B" }}>{record.unitName}</td>
+                <td style={{ padding: "11px 16px", fontSize: 12, fontWeight: 600, color: "#626972" }}>{record.action}</td>
+                <td style={{ padding: "11px 16px", fontSize: 12, color: "#515760" }}>{record.operator}</td>
+                <td className="font-data" style={{ padding: "11px 16px", fontSize: 12, color: "#515760" }}>{record.time}</td>
+                <td style={{ padding: "11px 16px", fontSize: 12, color: "#747A82" }}>{record.reason}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      {/* Confirm modal */}
-      {confirmTarget && (
-        <ConfirmModal
-          unit={confirmTarget.unit}
-          targetStatus={confirmTarget.targetStatus}
-          onConfirm={handleConfirm}
-          onCancel={() => setConfirmTarget(null)}
+      {dialog && dialogUnit && (
+        <LoopDialog
+          unit={dialogUnit}
+          label={dialog.label}
+          loops={dialogLoops}
+          onClose={() => setDialog(null)}
+          onOpenLoop={(loopId) => navigate("performance-monitor", { selectedLoopId: loopId })}
         />
       )}
     </div>

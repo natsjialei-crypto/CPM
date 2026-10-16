@@ -624,6 +624,13 @@ export const plant: Plant = {
 
 export const allLoops: Loop[] = Object.values(loops)
 
+export function calculateLoopIAE(loop: Loop): number {
+  return +(
+    (100 - loop.accuracy) * loop.trendRange * 0.6 +
+    loop.oscillationRate * 100
+  ).toFixed(1)
+}
+
 export function getAllLoopsFromUnit(unit: Unit): Loop[] {
   return unit.sections.flatMap((s) => s.loops)
 }

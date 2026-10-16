@@ -3,9 +3,11 @@ import {
   ComposedChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts"
-import { plant, allLoops } from "../data/mockData"
+import { plant, allLoops, calculateLoopIAE } from "../data/mockData"
 import type { AppState, Unit, Loop } from "../types"
 import { LoopList, VerticalBar, ModeBadge, perfColor, levelLabel, levelColor } from "./LoopMonitorPage"
+import TrendTimeControls, { defaultRangeForGranularity } from "../components/TrendTimeControls"
+import type { TrendGranularity } from "../components/TrendTimeControls"
 
 // ── Performance loop view ─────────────────────────────────────────────────────
 const KPI_DEFS = [
@@ -15,19 +17,18 @@ const KPI_DEFS = [
   { key: "accuracy",         label: "准确率",   unit: "%",  color: "#1A7A0A" },
   { key: "speed",            label: "快速率",   unit: "%",  color: "#39A820" },
   { key: "stability",        label: "稳定率",   unit: "%",  color: "#0E766B" },
+  { key: "iae",              label: "累计控制偏差（IAE）", unit: "", color: "#C35200" },
 ] as const
 type KpiKey = typeof KPI_DEFS[number]["key"]
 
-function generateKpiHistory(loop: Loop, days: number) {
-  const pts = 72
+function generateKpiHistory(loop: Loop, hours = 24) {
+  const pts = Math.max(2, Math.min(2000, Math.ceil(hours * 12)))
   const seed = loop.id.charCodeAt(loop.id.length - 1)
   return Array.from({ length: pts }, (_, i) => {
     const frac = i / (pts - 1)
-    const t = new Date(Date.now() - (1 - frac) * days * 86400_000)
+    const t = new Date(Date.now() - (1 - frac) * hours * 3600_000)
     const pad = (n: number) => String(n).padStart(2, "0")
-    const label = days <= 1
-      ? `${pad(t.getHours())}:${pad(t.getMinutes())}`
-      : `${pad(t.getMonth() + 1)}/${pad(t.getDate())} ${pad(t.getHours())}h`
+    const label = `${pad(t.getHours())}:${pad(t.getMinutes())}`
     const noise = (k: number) => Math.sin(i * 0.3 + seed * k) * 0.04 + (Math.random() - 0.5) * 0.02
     return {
       label,
@@ -37,6 +38,7 @@ function generateKpiHistory(loop: Loop, days: number) {
       accuracy:          +(loop.accuracy           * (1 + noise(4))).toFixed(1),
       speed:             +(loop.speed              * (1 + noise(5))).toFixed(1),
       stability:         +(loop.stability          * (1 + noise(6))).toFixed(1),
+      iae:               +(calculateLoopIAE(loop)  * (1 + noise(7))).toFixed(1),
     }
   })
 }
@@ -70,12 +72,43 @@ function PerformanceLoopView({
 
   const pc = perfColor(loop.performanceScore)
   const lc = levelColor(loop.performanceLevel)
+  const iae = calculateLoopIAE(loop).toFixed(1)
 
   // KPI trend
   const [activeTab, setActiveTab] = useState<"趋势图表" | "诊断结果" | "PID参数" | "操作分析" | "相关回路" | "故障分析">("趋势图表")
-  const [kpiDays, setKpiDays] = useState(7)
+  const [kpiWindowHours, setKpiWindowHours] = useState<number | null>(8)
+  const [kpiPanOffset, setKpiPanOffset] = useState(0)
+  const [kpiGranularity, setKpiGranularity] = useState<TrendGranularity>("hour")
+  const initialKpiRange = defaultRangeForGranularity("hour")
+  const [kpiCustomStart, setKpiCustomStart] = useState(initialKpiRange.start)
+  const [kpiCustomEnd, setKpiCustomEnd] = useState(initialKpiRange.end)
   const [selectedKpis, setSelectedKpis] = useState<Set<KpiKey>>(new Set(KPI_DEFS.map((k) => k.key)))
-  const kpiHistory = useMemo(() => generateKpiHistory(loop, kpiDays), [loop, kpiDays])
+  const kpiCustomHours = (new Date(kpiCustomEnd).getTime() - new Date(kpiCustomStart).getTime()) / 3600_000
+  const kpiCustomError = kpiWindowHours === null && (!Number.isFinite(kpiCustomHours) || kpiCustomHours <= 0)
+  const kpiHistory = useMemo(() => generateKpiHistory(loop, kpiWindowHours === null && !kpiCustomError ? kpiCustomHours : 24), [kpiCustomError, kpiCustomHours, kpiWindowHours, loop])
+  const kpiWindowSteps = Math.max(3, Math.floor((kpiWindowHours ?? 1) * 12))
+  const kpiMaxOffset = Math.max(0, kpiHistory.length - kpiWindowSteps)
+  const kpiPanStep = Math.max(1, Math.floor(kpiWindowSteps / 2))
+  const quickKpiHistory = useMemo(() => {
+    const end = Math.max(0, kpiHistory.length - kpiPanOffset)
+    const start = Math.max(0, end - kpiWindowSteps)
+    return kpiHistory.slice(start, end)
+  }, [kpiHistory, kpiPanOffset, kpiWindowSteps])
+  const displayKpiHistory = useMemo(() => {
+    if (kpiWindowHours !== null) return quickKpiHistory
+    if (kpiCustomError) return []
+    const desired = kpiGranularity === "hour"
+      ? Math.ceil(kpiCustomHours)
+      : kpiGranularity === "day"
+        ? Math.ceil(kpiCustomHours / 24)
+        : Math.ceil(kpiCustomHours / (24 * 30))
+    const count = Math.max(2, Math.min(kpiHistory.length, desired))
+    if (count >= kpiHistory.length) return kpiHistory
+    return Array.from({ length: count }, (_, index) =>
+      kpiHistory[Math.round((index * (kpiHistory.length - 1)) / (count - 1))],
+    )
+  }, [kpiCustomError, kpiCustomHours, kpiGranularity, kpiHistory, kpiWindowHours, quickKpiHistory])
+  const kpiXInterval = Math.max(1, Math.floor(displayKpiHistory.length / 8))
   const toggleKpi = (key: KpiKey) => setSelectedKpis((prev) => {
     const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n
   })
@@ -105,53 +138,53 @@ function PerformanceLoopView({
 
       {/* Top row: DCS faceplate | loop info + live KPIs */}
       <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
-        {/* Left: DCS panel */}
+        {/* Left: original PID panel structure with light theme */}
         <div style={{ flexShrink: 0, width: 272 }}>
-          <div style={{ background: "#2B2B2B", borderRadius: 12, border: "2px solid #444", boxShadow: "0 8px 32px rgba(0,0,0,0.5)", padding: "18px 20px", fontFamily: "monospace", height: "100%", boxSizing: "border-box" }}>
+          <div style={{ background: "#FFFFFF", borderRadius: 12, border: "1px solid #CDD2D9", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", padding: "18px 20px", fontFamily: "monospace", height: "100%", boxSizing: "border-box" }}>
             <div style={{ textAlign: "center", marginBottom: 12 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "#E8E8E8", letterSpacing: 1 }}>{loop.tag}</div>
-              <div style={{ fontSize: 10, color: "#9FA6AF", marginTop: 2 }}>{loop.name}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#004B8D", letterSpacing: 1 }}>{loop.tag}</div>
+              <div style={{ fontSize: 10, color: "#747A82", marginTop: 2 }}>{loop.name}</div>
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-              <div style={{ flex: 1, background: "#00BCD4", borderRadius: 4, padding: "6px 10px", textAlign: "center" }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#0D1117" }}>{live.op.toFixed(1)}</div>
+              <div style={{ flex: 1, background: "#EEF5FB", border: "1px solid #B8D8EE", borderRadius: 4, padding: "6px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#004B8D" }}>{live.op.toFixed(1)}</div>
               </div>
-              <div style={{ flex: 1, background: "#C8B800", borderRadius: 4, padding: "6px 10px", textAlign: "center" }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#0D1117" }}>{live.pv.toFixed(1)}</div>
+              <div style={{ flex: 1, background: "#FEF9EC", border: "1px solid #F7D98A", borderRadius: 4, padding: "6px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#92600A" }}>{live.pv.toFixed(1)}</div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-              <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: "#9FA6AF" }}>%</div>
-              <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: "#9FA6AF" }}>{loop.trendUnit}</div>
+              <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: "#747A82" }}>%</div>
+              <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: "#747A82" }}>{loop.trendUnit}</div>
             </div>
             <div style={{ display: "flex", marginBottom: 14 }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, marginRight: 14, paddingTop: 20 }}>
-                {["AUTO", "MAN", "Mode..."].map((m) => {
-                  const isActive = m === "AUTO" && loop.mode === "auto"
+                {["AUTO", "MAN", "Mode..."].map((mode) => {
+                  const active = mode === "AUTO" && loop.mode === "auto"
                   return (
-                    <div key={m} style={{ padding: "4px 8px", fontSize: 10, fontWeight: 700, background: isActive ? "#00BCD4" : "#3E3E3E", color: isActive ? "#0D1117" : "#9FA6AF", border: `1px solid ${isActive ? "#00BCD4" : "#555"}`, borderRadius: 3, textAlign: "center", userSelect: "none" }}>{m}</div>
+                    <div key={mode} style={{ padding: "4px 8px", fontSize: 10, fontWeight: 700, background: active ? "#EEF5FB" : "#F1F3F6", color: active ? "#004B8D" : "#9FA6AF", border: `1px solid ${active ? "#82B9DD" : "#CDD2D9"}`, borderRadius: 3, textAlign: "center", userSelect: "none" }}>{mode}</div>
                   )
                 })}
               </div>
               <div style={{ flex: 1, display: "flex", gap: 16, justifyContent: "center" }}>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <div style={{ fontSize: 9, color: "#686E77" }}>100</div>
-                  <VerticalBar value={live.op} hi={100} lo={0} fillColor="#00BCD4" />
-                  <div style={{ fontSize: 9, color: "#686E77" }}>0</div>
+                  <div style={{ fontSize: 9, color: "#747A82" }}>100</div>
+                  <VerticalBar value={live.op} hi={100} lo={0} fillColor="#3E8FC3" variant="light" />
+                  <div style={{ fontSize: 9, color: "#747A82" }}>0</div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <div style={{ fontSize: 9, color: "#686E77" }}>{hiPV.toFixed(1)}</div>
+                  <div style={{ fontSize: 9, color: "#747A82" }}>{hiPV.toFixed(1)}</div>
                   <div style={{ position: "relative" }}>
-                    <VerticalBar value={live.pv} hi={hiPV} lo={loPV} fillColor="#C8B800" spValue={live.sp} showSP />
+                    <VerticalBar value={live.pv} hi={hiPV} lo={loPV} fillColor="#F2B544" spValue={live.sp} showSP variant="light" />
                   </div>
-                  <div style={{ fontSize: 9, color: "#686E77" }}>{loPV.toFixed(1)}</div>
+                  <div style={{ fontSize: 9, color: "#747A82" }}>{loPV.toFixed(1)}</div>
                 </div>
               </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#9FA6AF", borderTop: "1px solid #3E3E3E", paddingTop: 10 }}>
-              <span>SP <span style={{ color: "#E0E0E0" }}>{live.sp.toFixed(1)}</span></span>
-              <span>PV <span style={{ color: "#C8B800" }}>{live.pv.toFixed(1)}</span></span>
-              <span>OP <span style={{ color: "#00BCD4" }}>{live.op.toFixed(1)}</span></span>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#747A82", borderTop: "1px solid #E0E4E9", paddingTop: 10 }}>
+              <span>SP <span style={{ color: "#004B8D" }}>{live.sp.toFixed(1)}</span></span>
+              <span>PV <span style={{ color: "#92600A" }}>{live.pv.toFixed(1)}</span></span>
+              <span>OUT <span style={{ color: "#004B8D" }}>{live.op.toFixed(1)}</span></span>
             </div>
           </div>
         </div>
@@ -168,7 +201,6 @@ function PerformanceLoopView({
                 { label: "归属单元",  value: `${unit?.deviceCode} ${unit?.deviceName}` },
                 { label: "回路类型",  value: loopTypeMap[loop.loopType] },
                 { label: "过程类型",  value: processTypeMap[loop.processType] },
-                { label: "OPC Item",  value: loop.opcItem,      mono: true },
               ].map((item) => (
                 <div key={item.label} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "5px 0", borderBottom: "1px solid #F8F9FA" }}>
                   <span style={{ fontSize: 11, color: "#9FA6AF", flexShrink: 0, width: 72 }}>{item.label}</span>
@@ -178,10 +210,10 @@ function PerformanceLoopView({
             </div>
           </div>
 
-          {/* Live KPI tiles */}
-          <div>
+          {/* Live KPI list */}
+          <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#9FA6AF", marginBottom: 10, letterSpacing: "0.05em", textTransform: "uppercase" }}>实时性能指标</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 0, borderRadius: 8, border: "1px solid #F1F3F6", overflow: "hidden" }}>
+            <div style={{ display: "flex", flexDirection: "column", borderRadius: 8, border: "1px solid #E0E4E9", overflow: "hidden" }}>
               {[
                 { label: "性能评分", value: loop.performanceScore.toFixed(1), unit: "分", color: pc.color },
                 { label: "定级",     value: levelLabel(loop.performanceLevel), color: lc.color },
@@ -190,10 +222,11 @@ function PerformanceLoopView({
                 { label: "准确率",   value: `${loop.accuracy.toFixed(1)}%`,            color: "#1A7A0A" },
                 { label: "快速率",   value: `${loop.speed.toFixed(1)}%`,               color: "#39A820" },
                 { label: "稳定率",   value: `${loop.stability.toFixed(1)}%`,           color: "#0E766B" },
+                { label: "累计控制偏差（IAE）", value: iae, unit: `${loop.trendUnit}·h`, color: "#C35200" },
               ].map((k, i, arr) => (
-                <div key={k.label} style={{ padding: "10px 10px", borderRight: i < arr.length - 1 ? "1px solid #F1F3F6" : "none", background: "#FAFBFC" }}>
-                  <div style={{ fontSize: 10, color: "#9FA6AF", marginBottom: 4, whiteSpace: "nowrap", fontWeight: 500 }}>{k.label}</div>
-                  <div style={{ fontSize: 17, fontWeight: 800, color: k.color, fontFamily: "monospace", lineHeight: 1, whiteSpace: "nowrap" }}>
+                <div key={k.label} style={{ minHeight: 40, padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, borderBottom: i < arr.length - 1 ? "1px solid #F1F3F6" : "none", background: i % 2 === 0 ? "#FAFBFC" : "#FFFFFF" }}>
+                  <div style={{ fontSize: 11, color: "#747A82", whiteSpace: "nowrap", fontWeight: 500 }}>{k.label}</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: k.color, fontFamily: "monospace", lineHeight: 1, whiteSpace: "nowrap", textAlign: "right" }}>
                     {k.value}
                     {"unit" in k && k.unit && <span style={{ fontSize: 10, fontWeight: 400, color: "#9FA6AF", marginLeft: 2 }}>{k.unit}</span>}
                   </div>
@@ -224,6 +257,34 @@ function PerformanceLoopView({
         <div style={{ background: "white", borderRadius: "0 0 12px 12px", border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 4px 16px rgba(27,39,52,0.07)", overflow: "hidden" }}>
           {activeTab === "趋势图表" && (
             <div>
+              <TrendTimeControls
+                selectedHours={kpiWindowHours}
+                onSelectHours={(hours) => {
+                  setKpiWindowHours(hours)
+                  setKpiPanOffset(0)
+                }}
+                granularity={kpiGranularity}
+                onGranularityChange={(value) => {
+                  const range = defaultRangeForGranularity(value)
+                  setKpiGranularity(value)
+                  setKpiCustomStart(range.start)
+                  setKpiCustomEnd(range.end)
+                }}
+                customStart={kpiCustomStart}
+                customEnd={kpiCustomEnd}
+                onCustomStartChange={setKpiCustomStart}
+                onCustomEndChange={setKpiCustomEnd}
+                customError={kpiCustomError ? "结束时间需晚于开始时间" : undefined}
+                navigation={{
+                  offset: kpiPanOffset,
+                  maxOffset: kpiMaxOffset,
+                  onOlder: () => setKpiPanOffset((offset) => Math.min(kpiMaxOffset, offset + kpiPanStep)),
+                  onNewer: () => setKpiPanOffset((offset) => Math.max(0, offset - kpiPanStep)),
+                  onLatest: () => setKpiPanOffset(0),
+                  onSlide: setKpiPanOffset,
+                }}
+              />
+
               <div style={{ padding: "13px 20px", borderBottom: "1px solid #F1F3F6", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 12, color: "#9FA6AF" }}>KPI参数</span>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -238,26 +299,22 @@ function PerformanceLoopView({
                     )
                   })}
                 </div>
-                <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
-                  {([1, 7, 30] as const).map((d) => (
-                    <button key={d} onClick={() => setKpiDays(d)}
-                      style={{ height: 26, padding: "0 10px", borderRadius: 5, border: kpiDays === d ? "1px solid #004B8D" : "1px solid #E0E4E9", background: kpiDays === d ? "#EEF5FB" : "white", color: kpiDays === d ? "#004B8D" : "#515760", fontSize: 11, fontWeight: kpiDays === d ? 600 : 400, cursor: "pointer" }}>
-                      {d === 1 ? "24h" : `${d}天`}
-                    </button>
-                  ))}
-                </div>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: "#9FA6AF" }}>
+                  {displayKpiHistory.length > 0 ? `${displayKpiHistory[0].label} — ${displayKpiHistory[displayKpiHistory.length - 1].label}` : ""}
+                </span>
               </div>
               <div style={{ padding: "16px 20px 12px" }}>
                 <ResponsiveContainer width="100%" height={260}>
-                  <ComposedChart data={kpiHistory} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+                  <ComposedChart data={displayKpiHistory} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#E0E4E9" strokeOpacity={0.6} />
-                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#9FA6AF" }} tickLine={false} axisLine={{ stroke: "#E0E4E9" }} interval={Math.floor(kpiHistory.length / 7)} />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#9FA6AF" }} tickLine={false} axisLine={{ stroke: "#E0E4E9" }} interval={kpiXInterval} />
                     <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#9FA6AF" }} tickLine={false} axisLine={false} width={36} unit="%" />
                     <Tooltip
                       contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #E0E4E9", boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}
                       formatter={(v: unknown, name: unknown) => {
                         const kd = KPI_DEFS.find((k) => k.label === name)
-                        return [`${(v as number).toFixed(1)}${kd?.unit ?? "%"}`, name as string]
+                        const unit = kd?.key === "iae" ? ` ${loop.trendUnit}·h` : kd?.unit ?? "%"
+                        return [`${(v as number).toFixed(1)}${unit}`, name as string]
                       }}
                     />
                     {KPI_DEFS.filter((kd) => selectedKpis.has(kd.key)).map((kd) => (
@@ -442,10 +499,16 @@ type Selection = { type: "plant" } | { type: "unit"; unitId: string } | { type: 
 
 export default function PerformanceMonitorPage({
   navigate,
+  selectedLoopId,
 }: {
   navigate: (page: AppState["page"], extra?: Partial<AppState>) => void
+  selectedLoopId?: string
 }) {
-  const [selection, setSelection] = useState<Selection>({ type: "plant" })
+  const [selection, setSelection] = useState<Selection>(
+    selectedLoopId && allLoops.some((loop) => loop.id === selectedLoopId)
+      ? { type: "loop", loopId: selectedLoopId }
+      : { type: "plant" },
+  )
   const [expandedUnits, setExpandedUnits] = useState<Set<string>>(new Set(plant.units.map((u) => u.id)))
   const [liveLoopMetrics, setLiveLoopMetrics] = useState<Record<string, { stability: number; score: number; autoRate: number }>>({})
   const tickRef = useRef(0)
@@ -698,7 +761,16 @@ export default function PerformanceMonitorPage({
                         </td>
                         <td style={{ padding: "12px 16px" }}>
                           {worst && unit.status === "running" ? (
-                            <span className="font-mono-code" style={{ fontSize: 11, color: "#D93838" }}>{worst.tag}</span>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                setSelection({ type: "loop", loopId: worst.id })
+                              }}
+                              style={{ padding: "4px 8px", border: "1px solid #FECACA", borderRadius: 6, background: "#FEF2F2", color: "#D93838", fontSize: 11, fontWeight: 600, fontFamily: "monospace", cursor: "pointer" }}
+                            >
+                              {worst.tag} · 进入回路
+                            </button>
                           ) : <span style={{ color: "#9FA6AF", fontSize: 12 }}>—</span>}
                         </td>
                       </tr>
@@ -725,7 +797,11 @@ export default function PerformanceMonitorPage({
               <p style={{ fontSize: 13, color: "#747A82", margin: 0 }}>{selectedUnit.deviceName}，共 {unitLoops(selectedUnit).length} 个控制回路</p>
             </div>
             <LoopList
+              key={selectedUnit.id}
               defaultUnitId={selectedUnit.id}
+              defaultSortKey="performanceScore"
+              defaultSortDir="asc"
+              actionLabel="进入回路"
               hideHeader
               onSelect={(loop) => setSelection({ type: "loop", loopId: loop.id })}
             />

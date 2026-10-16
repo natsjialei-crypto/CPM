@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react"
 import { plant, allLoops } from "../data/mockData"
 import type { AppState, Loop, PerfLevel } from "../types"
+import { useOperationalState } from "../state/OperationalState"
 
 function PerfLevelBadge({ level }: { level: number }) {
   const configs: Record<number, { label: string; bg: string; color: string }> = {
@@ -94,6 +95,7 @@ export default function LoopListPage({
   navigate: (page: AppState["page"], extra?: Partial<AppState>) => void
   filterUnitId?: string
 }) {
+  const { units, isEvaluationEnabled } = useOperationalState()
   const [unitFilter, setUnitFilter] = useState(filterUnitId || "")
   const [modelFilter, setModelFilter] = useState("")
   const [serviceFilter, setServiceFilter] = useState("")
@@ -122,7 +124,11 @@ export default function LoopListPage({
     let list = [...allLoops]
     if (unitFilter) list = list.filter((l) => l.unitId === unitFilter)
     if (modelFilter) list = list.filter((l) => l.modelType === modelFilter)
-    if (serviceFilter) list = list.filter((l) => l.serviceStatus === serviceFilter)
+    if (serviceFilter) {
+      list = list.filter((loop) =>
+        serviceFilter === "in-service" ? isEvaluationEnabled(loop.id) : !isEvaluationEnabled(loop.id),
+      )
+    }
     if (search) {
       const q = search.toLowerCase()
       list = list.filter((l) => l.tag.toLowerCase().includes(q) || l.name.toLowerCase().includes(q))
@@ -132,7 +138,7 @@ export default function LoopListPage({
       return mul * a.tag.localeCompare(b.tag)
     })
     return list
-  }, [unitFilter, modelFilter, serviceFilter, search, sortKey, sortDir])
+  }, [unitFilter, modelFilter, serviceFilter, search, sortKey, sortDir, isEvaluationEnabled])
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"))
@@ -149,24 +155,13 @@ export default function LoopListPage({
 
   return (
     <div style={{ padding: "24px" }}>
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-6">
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: "#171A1E", margin: 0 }}>回路台账</h1>
           <p style={{ fontSize: 13, color: "#747A82", margin: "4px 0 0" }}>
             全厂控制回路列表，共 {allLoops.length} 条记录
           </p>
         </div>
-        <button
-          style={{
-            height: 36, padding: "0 16px",
-            background: "#004B8D", color: "white", border: "none",
-            borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "#005A9B" }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "#004B8D" }}
-        >
-          + 新增回路
-        </button>
       </div>
 
       {/* Filters */}
@@ -239,7 +234,7 @@ export default function LoopListPage({
               </tr>
             ) : (
               filtered.map((loop: Loop, idx) => {
-                const unit = plant.units.find((u) => u.id === loop.unitId)
+                const unit = units.find((u) => u.id === loop.unitId)
                 const isShutdown = unit?.status === "shutdown"
                 return (
                   <tr
@@ -267,7 +262,7 @@ export default function LoopListPage({
                       <ModelBadge type={loop.modelType} />
                     </td>
                     <td style={{ padding: "11px 14px" }}>
-                      <ServiceBadge status={loop.serviceStatus} />
+                      <ServiceBadge status={isEvaluationEnabled(loop.id) ? "in-service" : "out-of-service"} />
                     </td>
                     <td style={{ padding: "11px 14px" }}>
                       <button

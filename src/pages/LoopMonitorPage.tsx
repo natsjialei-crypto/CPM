@@ -3,8 +3,10 @@ import {
   ComposedChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer,
 } from "recharts"
-import { allLoops, plant, generateTrendData } from "../data/mockData"
+import { allLoops, calculateLoopIAE, plant, generateHistoryData, generateTrendData } from "../data/mockData"
 import type { AppState, Loop, TrendPoint, RelatedLoopEntry, FaultEntry } from "../types"
+import TrendTimeControls, { defaultRangeForGranularity } from "../components/TrendTimeControls"
+import type { TrendGranularity } from "../components/TrendTimeControls"
 
 // ── event generation ──────────────────────────────────────────────────────────
 type LoopEventType = "alarm" | "manual"
@@ -81,9 +83,9 @@ export interface FaceplateData {
 }
 
 export function VerticalBar({
-  value, hi, lo, fillColor, spValue, showSP,
+  value, hi, lo, fillColor, spValue, showSP, variant = "dark",
 }: {
-  value: number; hi: number; lo: number; fillColor: string; spValue?: number; showSP?: boolean
+  value: number; hi: number; lo: number; fillColor: string; spValue?: number; showSP?: boolean; variant?: "dark" | "light"
 }) {
   const range = hi - lo
   const fillPct = Math.max(0, Math.min(100, ((value - lo) / range) * 100))
@@ -93,7 +95,7 @@ export function VerticalBar({
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 0 }}>
       {/* Bar */}
-      <div style={{ position: "relative", width: 36, height: BAR_H, background: "#3A3A3A", border: "1px solid #555", borderRadius: 2 }}>
+      <div style={{ position: "relative", width: 36, height: BAR_H, background: variant === "light" ? "#F1F3F6" : "#3A3A3A", border: `1px solid ${variant === "light" ? "#CDD2D9" : "#555"}`, borderRadius: 2 }}>
         {/* Fill */}
         <div style={{
           position: "absolute", bottom: 0, left: 0, right: 0,
@@ -107,7 +109,7 @@ export function VerticalBar({
           <div key={t} style={{
             position: "absolute", left: 0, right: 0,
             bottom: `${t}%`,
-            borderTop: "1px solid rgba(255,255,255,0.2)",
+            borderTop: `1px solid ${variant === "light" ? "rgba(81,87,96,0.18)" : "rgba(255,255,255,0.2)"}`,
           }} />
         ))}
         {/* SP triangle marker (right side) */}
@@ -119,7 +121,7 @@ export function VerticalBar({
             width: 0, height: 0,
             borderTop: "7px solid transparent",
             borderBottom: "7px solid transparent",
-            borderRight: "12px solid #E0E0E0",
+            borderRight: `12px solid ${variant === "light" ? "#004B8D" : "#E0E0E0"}`,
             transition: "bottom 0.8s ease",
           }} />
         )}
@@ -130,7 +132,7 @@ export function VerticalBar({
           position: "absolute",
           right: -52,
           bottom: `calc(${spPct}% - 9px)`,
-          fontSize: 11, color: "#E0E0E0", fontFamily: "monospace", whiteSpace: "nowrap",
+          fontSize: 11, color: variant === "light" ? "#004B8D" : "#E0E0E0", fontFamily: "monospace", whiteSpace: "nowrap",
         }}>
           {spValue.toFixed(1)}
         </div>
@@ -232,23 +234,43 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
 
   // Trend chart state
   const [activeTab, setActiveTab] = useState("perf")
-  const [windowHours, setWindowHours] = useState(1)
+  const [windowHours, setWindowHours] = useState<number | null>(0.25)
   const [panOffset, setPanOffset] = useState(0)
+  const [trendGranularity, setTrendGranularity] = useState<TrendGranularity>("hour")
+  const initialTrendRange = defaultRangeForGranularity("hour")
+  const [trendCustomStart, setTrendCustomStart] = useState(initialTrendRange.start)
+  const [trendCustomEnd, setTrendCustomEnd] = useState(initialTrendRange.end)
+  const trendCustomDays = (new Date(trendCustomEnd).getTime() - new Date(trendCustomStart).getTime()) / 86400_000
+  const trendCustomError = windowHours === null && (!Number.isFinite(trendCustomDays) || trendCustomDays <= 0)
   const trendDataRef = useRef<TrendPoint[]>([])
   if (trendDataRef.current.length === 0) {
-    trendDataRef.current = generateTrendData(loop.trendSP, loop.trendRange, loop.trendOpBase, loop.trendPattern, 4)
+    trendDataRef.current = generateTrendData(loop.trendSP, loop.trendRange, loop.trendOpBase, loop.trendPattern, 24)
   }
   const displayData = useMemo(() => {
+    if (windowHours === null) {
+      if (trendCustomError) return []
+      const data = generateHistoryData(loop.trendSP, loop.trendRange, loop.trendOpBase, loop.trendPattern, trendCustomDays)
+      const desired = trendGranularity === "hour"
+        ? Math.ceil(trendCustomDays * 24)
+        : trendGranularity === "day"
+          ? Math.ceil(trendCustomDays)
+          : Math.ceil(trendCustomDays / 30)
+      const count = Math.max(2, Math.min(data.length, desired))
+      if (count >= data.length) return data
+      return Array.from({ length: count }, (_, index) =>
+        data[Math.round((index * (data.length - 1)) / (count - 1))],
+      )
+    }
     const all = trendDataRef.current
     const stepMs = 20_000
     const windowSteps = Math.floor((windowHours * 3600 * 1000) / stepMs)
     const end = Math.max(0, all.length - panOffset)
     const start = Math.max(0, end - windowSteps)
     return all.slice(start, end)
-  }, [windowHours, panOffset])
+  }, [loop, panOffset, trendCustomDays, trendCustomError, trendGranularity, windowHours])
   const xInterval = Math.max(1, Math.floor(displayData.length / 8))
-  const panStep = Math.floor((windowHours * 3600 * 1000) / 20_000 / 2)
-  const maxOffset = Math.max(0, trendDataRef.current.length - Math.floor((windowHours * 3600 * 1000) / 20_000))
+  const panStep = Math.floor(((windowHours ?? 0.25) * 3600 * 1000) / 20_000 / 2)
+  const maxOffset = Math.max(0, trendDataRef.current.length - Math.floor(((windowHours ?? 0.25) * 3600 * 1000) / 20_000))
 
   // Related loops + faults state
   const [relatedLoops, setRelatedLoops] = useState<RelatedLoopEntry[]>(loop.relatedLoopEntries || [])
@@ -261,6 +283,7 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
   const isShutdown = unit?.status === "shutdown"
   const pc = perfColor(loop.performanceScore)
   const lc = levelColor(loop.performanceLevel)
+  const loopIAE = calculateLoopIAE(loop)
 
   const processTypeMap: Record<string, string> = { flow: "流量", pressure: "压力", level: "液位", temperature: "温度", composition: "成分" }
   const loopTypeMap: Record<string, string> = { single: "单回路", cascade: "串级", split: "分程", override: "超驰", feedforward: "前馈" }
@@ -298,7 +321,7 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
     [events, eventTypeFilter]
   )
 
-  // KPI items (7 static performance indicators)
+  // KPI items
   const kpiItems = [
     { label: "性能评分",   value: loop.performanceScore.toFixed(1), unit: "分", color: pc.color },
     { label: "定级",       value: levelLabel(loop.performanceLevel), unit: "",   color: lc.color },
@@ -307,6 +330,7 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
     { label: "准确率",     value: `${loop.accuracy.toFixed(1)}%`,              color: "#1A7A0A" },
     { label: "快速率",     value: `${loop.speed.toFixed(1)}%`,                 color: "#1A7A0A" },
     { label: "稳定率",     value: `${loop.stability.toFixed(1)}%`,             color: "#1A7A0A" },
+    { label: "累计控制偏差（IAE）", value: loopIAE.toFixed(1), unit: `${loop.trendUnit}·h`, color: "#C35200" },
   ]
 
   return (
@@ -388,7 +412,7 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
         {/* Right: KPI strip + basic info (always visible) */}
         <div style={{ flex: 1, minWidth: 0, background: "white", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 4px 16px rgba(27,39,52,0.07)", padding: "18px 24px", overflow: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
           {/* KPI tiles */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 0, borderRadius: 8, border: "1px solid #F1F3F6", overflow: "hidden" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 0, borderRadius: 8, border: "1px solid #F1F3F6", overflow: "hidden" }}>
             {kpiItems.map((k, i) => (
               <div key={k.label} style={{ padding: "10px 14px", borderRight: i < kpiItems.length - 1 ? "1px solid #F1F3F6" : "none", background: "#FAFBFC" }}>
                 <div style={{ fontSize: 10, color: "#9FA6AF", marginBottom: 4, whiteSpace: "nowrap", fontWeight: 500 }}>{k.label}</div>
@@ -459,10 +483,11 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
               <MetricGauge label="有效自控率 R" value={loop.effectiveAutoRate} unit="%" color="#0069A8" desc="自动模式下实际有效运行比例" />
               <MetricGauge label="准确率 A" value={loop.accuracy} unit="%" color="#3E8FC3" desc="PV在SP±容差带内的时间比例" />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
               <MetricGauge label="快速率 F" value={loop.speed} unit="%" color={loop.speed < 80 ? "#F28C28" : "#004B8D"} warn={loop.speed < 80} desc="响应速度满足要求的时间比例" />
               <MetricGauge label="稳定率 S" value={loop.stability} unit="%" color={loop.stability < 80 ? "#D93838" : "#004B8D"} warn={loop.stability < 80} desc="PV波动在允许范围内的比例" />
               <MetricGauge label="饱和率 Sa" value={loop.saturationRate} unit="%" color={loop.saturationRate > 10 ? "#D93838" : "#39C523"} warn={loop.saturationRate > 10} desc="输出处于饱和状态的时间比例" max={20} />
+              <MetricGauge label="累计控制偏差 IAE" value={loopIAE} unit={`${loop.trendUnit}·h`} color="#C35200" max={Math.max(100, loopIAE * 1.2)} desc="统计时段内绝对控制偏差积分" />
             </div>
             <div style={{ background: "white", borderRadius: 12, border: "1px solid #E0E4E9", padding: "18px 20px" }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "#30353B", marginBottom: 12 }}>综合性能评分 P</div>
@@ -498,28 +523,39 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
       {/* ── 趋势图表 ── */}
       {activeTab === "trend" && (
         <div style={{ background: "white", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", overflow: "hidden" }}>
-          <div style={{ padding: "14px 20px", borderBottom: "1px solid #E0E4E9", display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "#747A82", marginRight: 4 }}>时间窗口：</span>
-            {[{ label: "15分", hours: 0.25 }, { label: "30分", hours: 0.5 }, { label: "1小时", hours: 1 }, { label: "4小时", hours: 4 }].map((opt) => (
-              <button key={opt.hours} onClick={() => { setWindowHours(opt.hours); setPanOffset(0) }}
-                style={{ padding: "5px 12px", borderRadius: 6, border: windowHours === opt.hours ? "1px solid #004B8D" : "1px solid #CDD2D9", background: windowHours === opt.hours ? "#EEF5FB" : "white", color: windowHours === opt.hours ? "#004B8D" : "#515760", fontSize: 12, fontWeight: windowHours === opt.hours ? 600 : 400, cursor: "pointer" }}>
-                {opt.label}
-              </button>
-            ))}
-            <div style={{ flex: 1 }} />
-            <button onClick={() => setPanOffset((p) => Math.min(maxOffset, p + panStep))} disabled={panOffset >= maxOffset}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #CDD2D9", background: "white", color: panOffset >= maxOffset ? "#9FA6AF" : "#515760", fontSize: 12, cursor: panOffset >= maxOffset ? "default" : "pointer" }}>◀ 向前</button>
-            <button onClick={() => setPanOffset((p) => Math.max(0, p - panStep))} disabled={panOffset === 0}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #CDD2D9", background: "white", color: panOffset === 0 ? "#9FA6AF" : "#515760", fontSize: 12, cursor: panOffset === 0 ? "default" : "pointer" }}>向后 ▶</button>
-            <button onClick={() => setPanOffset(0)}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #004B8D", background: panOffset === 0 ? "#004B8D" : "white", color: panOffset === 0 ? "white" : "#004B8D", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>最新</button>
-          </div>
+          <TrendTimeControls
+            selectedHours={windowHours}
+            onSelectHours={(hours) => {
+              setWindowHours(hours)
+              setPanOffset(0)
+            }}
+            granularity={trendGranularity}
+            onGranularityChange={(value) => {
+              const range = defaultRangeForGranularity(value)
+              setTrendGranularity(value)
+              setTrendCustomStart(range.start)
+              setTrendCustomEnd(range.end)
+            }}
+            customStart={trendCustomStart}
+            customEnd={trendCustomEnd}
+            onCustomStartChange={setTrendCustomStart}
+            onCustomEndChange={setTrendCustomEnd}
+            customError={trendCustomError ? "结束时间需晚于开始时间" : undefined}
+            navigation={{
+              offset: panOffset,
+              maxOffset,
+              onOlder: () => setPanOffset((offset) => Math.min(maxOffset, offset + panStep)),
+              onNewer: () => setPanOffset((offset) => Math.max(0, offset - panStep)),
+              onLatest: () => setPanOffset(0),
+              onSlide: setPanOffset,
+            }}
+          />
           <div style={{ padding: "16px 20px 8px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 11 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 20, height: 2, background: "#004B8D", display: "inline-block" }} /><span style={{ color: "#515760" }}>PV — {loop.trendUnit}</span></span>
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 20, height: 2, background: "#3E8FC3", display: "inline-block" }} /><span style={{ color: "#515760" }}>SP</span></span>
-                <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 20, height: 2, background: "#39C523", display: "inline-block" }} /><span style={{ color: "#515760" }}>OP %（右轴）</span></span>
+                <span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 20, height: 2, background: "#39C523", display: "inline-block" }} /><span style={{ color: "#515760" }}>OUT %（右轴）</span></span>
               </div>
               <span style={{ fontSize: 11, color: "#9FA6AF" }}>{displayData.length > 0 ? `${displayData[0].timeStr} — ${displayData[displayData.length - 1].timeStr}` : ""}</span>
             </div>
@@ -534,13 +570,9 @@ export function LoopFaceplate({ loop, onBack, backLabel = "回路监控" }: { lo
                 <ReferenceLine yAxisId="pv" y={loop.pid.spLo} stroke="#F2B544" strokeDasharray="4 3" strokeWidth={1} label={{ value: "SP-L", fill: "#F2B544", fontSize: 9 }} />
                 <Line yAxisId="pv" type="monotone" dataKey="pv" stroke="#004B8D" strokeWidth={2} dot={false} name="PV" activeDot={{ r: 4, fill: "#004B8D" }} />
                 <Line yAxisId="pv" type="monotone" dataKey="sp" stroke="#3E8FC3" strokeWidth={1.5} strokeDasharray="6 4" dot={false} name="SP" />
-                <Line yAxisId="op" type="monotone" dataKey="op" stroke="#39C523" strokeWidth={1.5} dot={false} name="OP" />
+                <Line yAxisId="op" type="monotone" dataKey="op" stroke="#39C523" strokeWidth={1.5} dot={false} name="OUT" />
               </ComposedChart>
             </ResponsiveContainer>
-          </div>
-          <div style={{ padding: "4px 20px 16px" }}>
-            <input type="range" min={0} max={maxOffset} value={panOffset} onChange={(e) => setPanOffset(parseInt(e.target.value))} style={{ width: "100%", accentColor: "#004B8D" }} />
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#9FA6AF", marginTop: 2 }}><span>较早</span><span>最新</span></div>
           </div>
           {loop.trendPattern === "oscillating" && (
             <div style={{ margin: "0 20px 16px", padding: "8px 12px", background: "#FEF9EB", borderRadius: 6, border: "1px solid #FDE68A", fontSize: 12, color: "#92620A" }}>
@@ -873,12 +905,26 @@ function SortHeader({
 }
 
 // ── List view ──────────────────────────────────────────────────────────────────
-export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (loop: Loop) => void; defaultUnitId?: string; hideHeader?: boolean }) {
+export function LoopList({
+  onSelect,
+  defaultUnitId,
+  hideHeader,
+  defaultSortKey = null,
+  defaultSortDir = "desc",
+  actionLabel = "查看详情",
+}: {
+  onSelect: (loop: Loop) => void
+  defaultUnitId?: string
+  hideHeader?: boolean
+  defaultSortKey?: SortKey | null
+  defaultSortDir?: SortDir
+  actionLabel?: string
+}) {
   const [search, setSearch] = useState("")
   const [unitFilter, setUnitFilter] = useState(defaultUnitId ?? "")
   const [modeFilter, setModeFilter] = useState("")
-  const [sortKey, setSortKey] = useState<SortKey | null>(null)
-  const [sortDir, setSortDir] = useState<SortDir>("desc")
+  const [sortKey, setSortKey] = useState<SortKey | null>(defaultSortKey)
+  const [sortDir, setSortDir] = useState<SortDir>(defaultSortDir)
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => d === "asc" ? "desc" : "asc")
@@ -919,7 +965,7 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
       )}
 
       {/* Overall KPI summary */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 10, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 10, marginBottom: 16 }}>
         {(() => {
           const active = filtered.filter((l) => l.mode !== "unused")
           const avgScore = avg(active, "performanceScore")
@@ -935,6 +981,7 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
             { label: "准确率",     value: active.length ? `${avg(active, "accuracy").toFixed(1)}%` : "—",          color: "#1A7A0A" },
             { label: "快速率",     value: active.length ? `${avg(active, "speed").toFixed(1)}%` : "—",             color: "#1A7A0A" },
             { label: "稳定率",     value: active.length ? `${avg(active, "stability").toFixed(1)}%` : "—",         color: "#1A7A0A" },
+            { label: "累计控制偏差（IAE）", value: active.length ? (active.reduce((sum, item) => sum + calculateLoopIAE(item), 0) / active.length).toFixed(1) : "—", unit: "均值", color: "#C35200" },
           ]
           return kpis.map((k) => (
             <div key={k.label} style={{ background: "white", borderRadius: 10, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 2px 8px rgba(27,39,52,0.06)", padding: "12px 14px" }}>
@@ -982,7 +1029,7 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
       <div style={{ background: "white", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 4px 16px rgba(27,39,52,0.07)", overflow: "hidden" }}>
         {/* Header */}
         <div style={{
-          display: "grid", gridTemplateColumns: "140px 1fr 150px 76px 80px 68px 80px 80px 76px 76px 76px 80px",
+          display: "grid", gridTemplateColumns: "140px 1fr 150px 76px 80px 68px 80px 80px 76px 76px 76px 82px 80px",
           padding: "10px 16px", background: "#F9FAFB", borderBottom: "1px solid #F1F3F6",
           fontSize: 11, fontWeight: 600, color: "#9FA6AF", gap: 8,
         }}>
@@ -997,6 +1044,7 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
           <SortHeader label="准确率" sortKey="accuracy" current={sortKey} dir={sortDir} onSort={handleSort} />
           <SortHeader label="快速率" sortKey="speed" current={sortKey} dir={sortDir} onSort={handleSort} />
           <SortHeader label="稳定率" sortKey="stability" current={sortKey} dir={sortDir} onSort={handleSort} />
+          <span style={{ textAlign: "center" }}>IAE</span>
           <span />
         </div>
 
@@ -1028,7 +1076,7 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
               <div
                 key={loop.id}
                 style={{
-                  display: "grid", gridTemplateColumns: "140px 1fr 150px 76px 80px 68px 80px 80px 76px 76px 76px 80px",
+                  display: "grid", gridTemplateColumns: "140px 1fr 150px 76px 80px 68px 80px 80px 76px 76px 76px 82px 80px",
                   padding: "11px 16px", gap: 8, alignItems: "center",
                   borderBottom: idx < filtered.length - 1 ? `1px solid ${isBad ? "#FEE2E2" : "#F1F3F6"}` : "none",
                   borderLeft: isBad ? "3px solid #F87171" : "3px solid transparent",
@@ -1064,12 +1112,13 @@ export function LoopList({ onSelect, defaultUnitId, hideHeader }: { onSelect: (l
                 {kpiCell(`${loop.accuracy.toFixed(1)}%`)}
                 {kpiCell(`${loop.speed.toFixed(1)}%`)}
                 {kpiCell(`${loop.stability.toFixed(1)}%`)}
+                {kpiCell(calculateLoopIAE(loop).toFixed(1))}
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={() => onSelect(loop)}
                     style={{ fontSize: 11, color: "#004B8D", background: "#EEF5FB", border: "1px solid #D9EAF7", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontWeight: 500, whiteSpace: "nowrap" }}
                   >
-                    查看详情
+                    {actionLabel}
                   </button>
                 </div>
               </div>

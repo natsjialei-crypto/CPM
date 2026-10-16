@@ -1,10 +1,12 @@
-import { useState, useMemo, useRef } from "react"
+import { useState, useMemo } from "react"
 import {
   ComposedChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts"
-import { allLoops, plant, generateTrendData } from "../data/mockData"
+import { allLoops, plant, generateHistoryData, generateTrendData } from "../data/mockData"
 import type { AppState, Loop } from "../types"
+import TrendTimeControls, { defaultRangeForGranularity } from "../components/TrendTimeControls"
+import type { TrendGranularity } from "../components/TrendTimeControls"
 
 // ── event generation (mirrors LoopMonitorPage logic) ──────────────────────────
 type LoopEventType = "alarm" | "manual"
@@ -442,18 +444,34 @@ function GroupDetailPage({
   type Signal = typeof SIGNALS[number]
   const [enabledLoops, setEnabledLoops] = useState<Set<string>>(() => new Set(loops.map((l) => l!.id)))
   const [enabledSignals, setEnabledSignals] = useState<Set<Signal>>(new Set(["pv", "sp", "op"]))
-  const trendCacheRef = useRef<Map<string, ReturnType<typeof generateTrendData>>>(new Map())
+  const [trendHours, setTrendHours] = useState<number | null>(0.25)
+  const [trendGranularity, setTrendGranularity] = useState<TrendGranularity>("hour")
+  const initialTrendRange = defaultRangeForGranularity("hour")
+  const [trendCustomStart, setTrendCustomStart] = useState(initialTrendRange.start)
+  const [trendCustomEnd, setTrendCustomEnd] = useState(initialTrendRange.end)
+  const trendCustomDays = (new Date(trendCustomEnd).getTime() - new Date(trendCustomStart).getTime()) / 86400_000
+  const trendCustomError = trendHours === null && (!Number.isFinite(trendCustomDays) || trendCustomDays <= 0)
 
   const trendData = useMemo(() => {
-    // Generate 1h of data per loop (aligned by index)
     const perLoop = loops.map((l) => {
       if (!l) return []
-      if (!trendCacheRef.current.has(l.id)) {
-        trendCacheRef.current.set(l.id, generateTrendData(l.trendSP, l.trendRange, l.trendOpBase, l.trendPattern, 1))
+      if (trendHours !== null) {
+        return generateTrendData(l.trendSP, l.trendRange, l.trendOpBase, l.trendPattern, trendHours)
       }
-      return trendCacheRef.current.get(l.id)!
+      if (trendCustomError) return []
+      const data = generateHistoryData(l.trendSP, l.trendRange, l.trendOpBase, l.trendPattern, trendCustomDays)
+      const desired = trendGranularity === "hour"
+        ? Math.ceil(trendCustomDays * 24)
+        : trendGranularity === "day"
+          ? Math.ceil(trendCustomDays)
+          : Math.ceil(trendCustomDays / 30)
+      const count = Math.max(2, Math.min(data.length, desired))
+      if (count >= data.length) return data
+      return Array.from({ length: count }, (_, index) =>
+        data[Math.round((index * (data.length - 1)) / (count - 1))],
+      )
     })
-    const len = Math.min(...perLoop.map((d) => d.length), 180)
+    const len = Math.min(...perLoop.map((d) => d.length))
     return Array.from({ length: len }, (_, i) => {
       const pt: Record<string, string | number> = { timeStr: perLoop[0]?.[i]?.timeStr ?? "" }
       loops.forEach((l, li) => {
@@ -467,7 +485,7 @@ function GroupDetailPage({
       })
       return pt
     })
-  }, [loops])
+  }, [loops, trendCustomDays, trendCustomError, trendGranularity, trendHours])
 
   // Cross-loop event timeline
   const groupEvents = useMemo(() => {
@@ -687,16 +705,32 @@ function GroupDetailPage({
 
       {/* ── Multi-loop trend chart ── */}
       <div style={{ marginTop: 16, background: "white", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 4px 16px rgba(27,39,52,0.07)", overflow: "hidden" }}>
+        <TrendTimeControls
+          selectedHours={trendHours}
+          onSelectHours={setTrendHours}
+          granularity={trendGranularity}
+          onGranularityChange={(value) => {
+            const range = defaultRangeForGranularity(value)
+            setTrendGranularity(value)
+            setTrendCustomStart(range.start)
+            setTrendCustomEnd(range.end)
+          }}
+          customStart={trendCustomStart}
+          customEnd={trendCustomEnd}
+          onCustomStartChange={setTrendCustomStart}
+          onCustomEndChange={setTrendCustomEnd}
+          customError={trendCustomError ? "结束时间需晚于开始时间" : undefined}
+        />
         {/* Header + controls */}
         <div style={{ padding: "13px 20px", borderBottom: "1px solid #F1F3F6", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, fontWeight: 600, color: "#30353B" }}>关联回路趋势对比</span>
-          <span style={{ fontSize: 12, color: "#9FA6AF" }}>1小时数据窗口，多回路 PV/SP/OP 叠加</span>
+          <span style={{ fontSize: 12, color: "#9FA6AF" }}>多回路 PV/SP/OUT 叠加</span>
           {/* Signal toggles */}
           <div style={{ display: "flex", gap: 4 }}>
             {(["pv", "sp", "op"] as Signal[]).map((sig) => (
               <button key={sig} onClick={() => setEnabledSignals((prev) => { const n = new Set(prev); n.has(sig) ? n.delete(sig) : n.add(sig); return n })}
                 style={{ height: 26, padding: "0 10px", borderRadius: 5, border: enabledSignals.has(sig) ? "1px solid #004B8D" : "1px solid #E0E4E9", background: enabledSignals.has(sig) ? "#EEF5FB" : "white", color: enabledSignals.has(sig) ? "#004B8D" : "#9FA6AF", fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "uppercase" }}>
-                {sig}
+                {sig === "op" ? "OUT" : sig}
               </button>
             ))}
           </div>
@@ -749,7 +783,7 @@ function GroupDetailPage({
                       stroke={col} strokeWidth={1.2} strokeDasharray="5 3" dot={false} strokeOpacity={0.6} />
                   ),
                   enabledSignals.has("op") && (
-                    <Line key={`${l.tag}_op`} type="monotone" dataKey={`${l.tag}_op`} name={`${l.tag} OP`}
+                    <Line key={`${l.tag}_op`} type="monotone" dataKey={`${l.tag}_op`} name={`${l.tag} OUT`}
                       stroke={col} strokeWidth={1} strokeDasharray="2 4" dot={false} strokeOpacity={0.5} />
                   ),
                 ].filter(Boolean)
@@ -758,7 +792,7 @@ function GroupDetailPage({
           </ResponsiveContainer>
           {/* Legend legend */}
           <div style={{ display: "flex", gap: 16, justifyContent: "center", marginTop: 4, flexWrap: "wrap" }}>
-            {[{ dash: "none", label: "PV — 实线" }, { dash: "5 3", label: "SP — 中虚线" }, { dash: "2 4", label: "OP — 短虚线" }].map((s) => (
+            {[{ dash: "none", label: "PV — 实线" }, { dash: "5 3", label: "SP — 中虚线" }, { dash: "2 4", label: "OUT — 短虚线" }].map((s) => (
               <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: "#9FA6AF" }}>
                 <svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#9FA6AF" strokeWidth="1.5" strokeDasharray={s.dash === "none" ? undefined : s.dash} /></svg>
                 {s.label}

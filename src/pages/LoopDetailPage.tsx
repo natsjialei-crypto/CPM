@@ -9,8 +9,10 @@ import {
   ReferenceLine,
   ResponsiveContainer,
 } from "recharts"
-import { getLoopById, plant, generateTrendData } from "../data/mockData"
+import { calculateLoopIAE, getLoopById, plant, generateHistoryData, generateTrendData } from "../data/mockData"
 import type { AppState, TrendPoint, RelatedLoopEntry, FaultEntry } from "../types"
+import TrendTimeControls, { defaultRangeForGranularity } from "../components/TrendTimeControls"
+import type { TrendGranularity } from "../components/TrendTimeControls"
 
 function PerfLevelBadge({ level }: { level: number }) {
   const configs: Record<number, { label: string; bg: string; color: string }> = {
@@ -81,6 +83,55 @@ function DiagnosticRow({ label, value, threshold, unit: u, lowerBetter = true, d
   )
 }
 
+interface AttributeItem {
+  label: string
+  value: string | number
+  unit?: string
+}
+
+function AttributeGroup({
+  title,
+  code,
+  items,
+}: {
+  title: string
+  code: string
+  items: AttributeItem[]
+}) {
+  return (
+    <div style={{ border: "1px solid #E0E4E9", borderRadius: 10, overflow: "hidden", background: "#FFFFFF" }}>
+      <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, background: "#F7F8FA", borderBottom: "1px solid #E0E4E9" }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "#30353B" }}>{title}</span>
+        <span style={{ fontSize: 10, color: "#9FA6AF", fontFamily: "monospace" }}>{code}</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+        {items.map((item, index) => (
+          <div
+            key={item.label}
+            style={{
+              minHeight: 39,
+              padding: "8px 12px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              borderRight: index % 2 === 0 ? "1px solid #F1F3F6" : "none",
+              borderBottom: index < items.length - (items.length % 2 === 0 ? 2 : 1) ? "1px solid #F1F3F6" : "none",
+              background: Math.floor(index / 2) % 2 === 0 ? "#FFFFFF" : "#FAFBFC",
+            }}
+          >
+            <span style={{ fontSize: 11, color: "#747A82" }}>{item.label}</span>
+            <span className="font-data" style={{ fontSize: 12, fontWeight: 600, color: "#30353B", textAlign: "right" }}>
+              {item.value}
+              {item.unit && <span style={{ marginLeft: 3, fontSize: 10, fontWeight: 400, color: "#9FA6AF" }}>{item.unit}</span>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function LoopDetailPage({
   loopId,
   navigate,
@@ -90,8 +141,14 @@ export default function LoopDetailPage({
 }) {
   const loop = getLoopById(loopId)
   const [activeTab, setActiveTab] = useState("perf")
-  const [windowHours, setWindowHours] = useState(1)
+  const [windowHours, setWindowHours] = useState<number | null>(0.25)
   const [panOffset, setPanOffset] = useState(0)
+  const [trendGranularity, setTrendGranularity] = useState<TrendGranularity>("hour")
+  const initialTrendRange = defaultRangeForGranularity("hour")
+  const [trendCustomStart, setTrendCustomStart] = useState(initialTrendRange.start)
+  const [trendCustomEnd, setTrendCustomEnd] = useState(initialTrendRange.end)
+  const trendCustomDays = (new Date(trendCustomEnd).getTime() - new Date(trendCustomStart).getTime()) / 86400_000
+  const trendCustomError = windowHours === null && (!Number.isFinite(trendCustomDays) || trendCustomDays <= 0)
 
   const trendDataRef = useRef<TrendPoint[]>([])
   if (trendDataRef.current.length === 0 && loop) {
@@ -100,19 +157,33 @@ export default function LoopDetailPage({
       loop.trendRange,
       loop.trendOpBase,
       loop.trendPattern,
-      4,
+      24,
     )
   }
 
   const displayData = useMemo(() => {
     if (!loop) return []
+    if (windowHours === null) {
+      if (trendCustomError) return []
+      const data = generateHistoryData(loop.trendSP, loop.trendRange, loop.trendOpBase, loop.trendPattern, trendCustomDays)
+      const desired = trendGranularity === "hour"
+        ? Math.ceil(trendCustomDays * 24)
+        : trendGranularity === "day"
+          ? Math.ceil(trendCustomDays)
+          : Math.ceil(trendCustomDays / 30)
+      const count = Math.max(2, Math.min(data.length, desired))
+      if (count >= data.length) return data
+      return Array.from({ length: count }, (_, index) =>
+        data[Math.round((index * (data.length - 1)) / (count - 1))],
+      )
+    }
     const all = trendDataRef.current
     const stepMs = 20_000
     const windowSteps = Math.floor((windowHours * 3600 * 1000) / stepMs)
     const end = Math.max(0, all.length - panOffset)
     const start = Math.max(0, end - windowSteps)
     return all.slice(start, end)
-  }, [loop, windowHours, panOffset])
+  }, [loop, panOffset, trendCustomDays, trendCustomError, trendGranularity, windowHours])
 
   const xInterval = Math.max(1, Math.floor(displayData.length / 8))
 
@@ -126,6 +197,7 @@ export default function LoopDetailPage({
 
   const unit = plant.units.find((u) => u.id === loop.unitId)
   const isShutdown = unit?.status === "shutdown"
+  const loopIAE = calculateLoopIAE(loop)
 
   const processTypeMap: Record<string, string> = {
     flow: "流量",
@@ -148,6 +220,66 @@ export default function LoopDetailPage({
     pid: "PID参数",
     other: "其他",
   }
+  const pvSpan = loop.pid.spHi - loop.pid.spLo
+  const deviationLimit = Math.max(loop.trendRange * 0.5, pvSpan * 0.05)
+  const formatValue = (value: number) => value.toFixed(loop.processType === "pressure" ? 2 : 1)
+  const attributeGroups: Array<{ title: string; code: string; items: AttributeItem[] }> = [
+    {
+      title: "限值参数",
+      code: "Limits",
+      items: [
+        { label: "高高限", value: formatValue(loop.pid.spHi), unit: loop.trendUnit },
+        { label: "高限", value: formatValue(loop.pid.spHi - pvSpan * 0.05), unit: loop.trendUnit },
+        { label: "高/低偏差限值", value: `+${formatValue(deviationLimit)} / -${formatValue(deviationLimit)}`, unit: loop.trendUnit },
+        { label: "低限", value: formatValue(loop.pid.spLo + pvSpan * 0.05), unit: loop.trendUnit },
+        { label: "低低限", value: formatValue(loop.pid.spLo), unit: loop.trendUnit },
+        { label: "输出高限", value: loop.pid.outputHi, unit: "%" },
+        { label: "输出低限", value: loop.pid.outputLo, unit: "%" },
+        { label: "抗积分饱和高限", value: loop.pid.arwHi, unit: "%" },
+        { label: "抗积分饱和低限", value: loop.pid.arwLo, unit: "%" },
+        { label: "设定值高限和低限", value: `${formatValue(loop.pid.spHi)} / ${formatValue(loop.pid.spLo)}`, unit: loop.trendUnit },
+        { label: "报警迟滞", value: "0.5", unit: "%" },
+      ],
+    },
+    {
+      title: "报警参数",
+      code: "Alarms",
+      items: [
+        { label: "高高报警", value: "严重 · 已启用" },
+        { label: "高报警", value: "警告 · 已启用" },
+        { label: "高偏差报警", value: "提示 · 已启用" },
+        { label: "低偏差报警", value: "提示 · 已启用" },
+        { label: "低报警", value: "警告 · 已启用" },
+        { label: "低低报警", value: "严重 · 已启用" },
+        { label: "模块报警", value: "严重 · 已启用" },
+        { label: "报警优先级调整", value: "0" },
+      ],
+    },
+    {
+      title: "整定参数",
+      code: "Tuning",
+      items: [
+        { label: "比例项", value: loop.pid.P },
+        { label: "积分项", value: loop.pid.I, unit: "s" },
+        { label: "微分项", value: loop.pid.D, unit: "s" },
+        { label: "被控变量滤波时间常数", value: loop.pid.pvFilter, unit: "s" },
+        { label: "设定值滤波时间常数", value: "0.0", unit: "s" },
+        { label: "设定值上升/下降速率", value: "0.0 / 0.0", unit: "%/s" },
+        { label: "PID结构", value: "PI作用于偏差，D作用于PV" },
+        { label: "积分死区", value: "0.0", unit: "%" },
+      ],
+    },
+    {
+      title: "高级整定",
+      code: "Advanced Tuning",
+      items: [
+        { label: "PID作用方向", value: loop.processType === "level" ? "正作用" : "反作用" },
+        { label: "PID输出方向", value: "输出增加" },
+        { label: "PID/AO1输出方式", value: "气开" },
+        { label: "AO1输出方向", value: "随PID输出增加" },
+      ],
+    },
+  ]
 
   const [relatedLoops, setRelatedLoops] = useState<RelatedLoopEntry[]>(loop.relatedLoopEntries || [])
   const [faultEntries, setFaultEntries] = useState<FaultEntry[]>(loop.faultEntries || [])
@@ -166,15 +298,8 @@ export default function LoopDetailPage({
     { key: "info", label: "基本信息" },
   ]
 
-  const windowOptions = [
-    { label: "15分", hours: 0.25 },
-    { label: "30分", hours: 0.5 },
-    { label: "1小时", hours: 1 },
-    { label: "4小时", hours: 4 },
-  ]
-
-  const panStep = Math.floor((windowHours * 3600 * 1000) / 20_000 / 2)
-  const maxOffset = Math.max(0, trendDataRef.current.length - Math.floor((windowHours * 3600 * 1000) / 20_000))
+  const panStep = Math.floor(((windowHours ?? 0.25) * 3600 * 1000) / 20_000 / 2)
+  const maxOffset = Math.max(0, trendDataRef.current.length - Math.floor(((windowHours ?? 0.25) * 3600 * 1000) / 20_000))
 
   return (
     <div style={{ padding: "24px" }}>
@@ -286,10 +411,11 @@ export default function LoopDetailPage({
                 <MetricGauge label="有效自控率 R" value={loop.effectiveAutoRate} unit="%" color="#0069A8" desc="自动模式下实际有效运行比例" />
                 <MetricGauge label="准确率 A" value={loop.accuracy} unit="%" color="#3E8FC3" desc="PV在SP±容差带内的时间比例" />
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
                 <MetricGauge label="快速率 F" value={loop.speed} unit="%" color={loop.speed < 80 ? "#F28C28" : "#004B8D"} warn={loop.speed < 80} desc="响应速度满足要求的时间比例" />
                 <MetricGauge label="稳定率 S" value={loop.stability} unit="%" color={loop.stability < 80 ? "#D93838" : "#004B8D"} warn={loop.stability < 80} desc="PV波动在允许范围内的比例" />
                 <MetricGauge label="饱和率 Sa" value={loop.saturationRate} unit="%" color={loop.saturationRate > 10 ? "#D93838" : "#39C523"} warn={loop.saturationRate > 10} desc="输出处于饱和状态的时间比例" max={20} />
+                <MetricGauge label="累计控制偏差 IAE" value={loopIAE} unit={`${loop.trendUnit}·h`} color="#C35200" max={Math.max(100, loopIAE * 1.2)} desc="统计时段内绝对控制偏差积分" />
               </div>
 
               {/* Score formula */}
@@ -331,58 +457,33 @@ export default function LoopDetailPage({
 
       {activeTab === "trend" && (
         <div style={{ background: "white", borderRadius: 12, border: "1px solid rgba(96,108,122,0.12)", boxShadow: "0 8px 24px rgba(27,39,52,0.07)", overflow: "hidden" }}>
-          {/* Toolbar */}
-          <div style={{ padding: "14px 20px", borderBottom: "1px solid #E0E4E9", display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 12, color: "#747A82", marginRight: 4 }}>时间窗口：</span>
-            {windowOptions.map((opt) => (
-              <button
-                key={opt.hours}
-                onClick={() => { setWindowHours(opt.hours); setPanOffset(0) }}
-                style={{
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  border: windowHours === opt.hours ? "1px solid #004B8D" : "1px solid #CDD2D9",
-                  background: windowHours === opt.hours ? "#EEF5FB" : "white",
-                  color: windowHours === opt.hours ? "#004B8D" : "#515760",
-                  fontSize: 12,
-                  fontWeight: windowHours === opt.hours ? 600 : 400,
-                  cursor: "pointer",
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
-            <div style={{ flex: 1 }} />
-            <button
-              onClick={() => setPanOffset((p) => Math.min(maxOffset, p + panStep))}
-              disabled={panOffset >= maxOffset}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #CDD2D9", background: "white", color: panOffset >= maxOffset ? "#9FA6AF" : "#515760", fontSize: 12, cursor: panOffset >= maxOffset ? "default" : "pointer" }}
-            >
-              ◀ 向前
-            </button>
-            <button
-              onClick={() => setPanOffset((p) => Math.max(0, p - panStep))}
-              disabled={panOffset === 0}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #CDD2D9", background: "white", color: panOffset === 0 ? "#9FA6AF" : "#515760", fontSize: 12, cursor: panOffset === 0 ? "default" : "pointer" }}
-            >
-              向后 ▶
-            </button>
-            <button
-              onClick={() => setPanOffset(0)}
-              style={{
-                padding: "5px 12px",
-                borderRadius: 6,
-                border: "1px solid #004B8D",
-                background: panOffset === 0 ? "#004B8D" : "white",
-                color: panOffset === 0 ? "white" : "#004B8D",
-                fontSize: 12,
-                cursor: "pointer",
-                fontWeight: 500,
-              }}
-            >
-              最新
-            </button>
-          </div>
+          <TrendTimeControls
+            selectedHours={windowHours}
+            onSelectHours={(hours) => {
+              setWindowHours(hours)
+              setPanOffset(0)
+            }}
+            granularity={trendGranularity}
+            onGranularityChange={(value) => {
+              const range = defaultRangeForGranularity(value)
+              setTrendGranularity(value)
+              setTrendCustomStart(range.start)
+              setTrendCustomEnd(range.end)
+            }}
+            customStart={trendCustomStart}
+            customEnd={trendCustomEnd}
+            onCustomStartChange={setTrendCustomStart}
+            onCustomEndChange={setTrendCustomEnd}
+            customError={trendCustomError ? "结束时间需晚于开始时间" : undefined}
+            navigation={{
+              offset: panOffset,
+              maxOffset,
+              onOlder: () => setPanOffset((offset) => Math.min(maxOffset, offset + panStep)),
+              onNewer: () => setPanOffset((offset) => Math.max(0, offset - panStep)),
+              onLatest: () => setPanOffset(0),
+              onSlide: setPanOffset,
+            }}
+          />
 
           {/* Chart */}
           <div style={{ padding: "16px 20px 8px" }}>
@@ -398,7 +499,7 @@ export default function LoopDetailPage({
                 </span>
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ width: 20, height: 2, background: "#39C523", display: "inline-block" }} />
-                  <span style={{ color: "#515760" }}>OP — %（右轴）</span>
+                  <span style={{ color: "#515760" }}>OUT — %（右轴）</span>
                 </span>
               </div>
               <span style={{ fontSize: 11, color: "#9FA6AF" }}>
@@ -488,26 +589,10 @@ export default function LoopDetailPage({
                   stroke="#39C523"
                   strokeWidth={1.5}
                   dot={false}
-                  name="OP"
+                  name="OUT"
                 />
               </ComposedChart>
             </ResponsiveContainer>
-          </div>
-
-          {/* Scroll bar */}
-          <div style={{ padding: "4px 20px 16px" }}>
-            <input
-              type="range"
-              min={0}
-              max={maxOffset}
-              value={panOffset}
-              onChange={(e) => setPanOffset(parseInt(e.target.value))}
-              style={{ width: "100%", accentColor: "#004B8D" }}
-            />
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#9FA6AF", marginTop: 2 }}>
-              <span>较早</span>
-              <span>最新</span>
-            </div>
           </div>
 
           {/* Hint */}
@@ -1032,7 +1117,6 @@ export default function LoopDetailPage({
                 { label: "回路类型", value: loopTypeMap[loop.loopType] },
                 { label: "过程类型", value: processTypeMap[loop.processType] },
                 { label: "投用状态", value: loop.mode === "auto" ? "自动" : loop.mode === "manual" ? "手动" : "未投用" },
-                { label: "OPC Item地址", value: loop.opcItem, mono: true },
               ].map((item) => (
                 <div key={item.label} style={{ display: "flex", alignItems: "flex-start", padding: "8px 0", borderBottom: "1px solid #F1F3F6", fontSize: 13 }}>
                   <span style={{ width: 120, color: "#747A82", flexShrink: 0 }}>{item.label}</span>
@@ -1076,6 +1160,18 @@ export default function LoopDetailPage({
                   )}
                 </div>
               )}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 24, paddingTop: 20, borderTop: "1px solid #E0E4E9" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#30353B" }}>属性信息</span>
+              <span style={{ fontSize: 11, color: "#9FA6AF" }}>控制器限值、报警与整定组态</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              {attributeGroups.map((group) => (
+                <AttributeGroup key={group.code} title={group.title} code={group.code} items={group.items} />
+              ))}
             </div>
           </div>
         </div>
